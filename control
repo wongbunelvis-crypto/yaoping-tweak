@@ -1,0 +1,9 @@
+Package: com.suchuan.yaopingctl
+Name: 遥屏控制
+Version: 1.0
+Architecture: iphoneos-arm64
+Description: 接收 iPad 端触控指令并注入系统，实现远程点击
+Maintainer: Li sai
+Author: Li sai
+Section: Tweaks
+Depends: mobilesubstrate
