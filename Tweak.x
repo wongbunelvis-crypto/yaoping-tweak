@@ -11,6 +11,10 @@
 #include <netdb.h>
 #include <unistd.h>
 #include <string.h>
+#include <dlfcn.h>
+
+static void kxLog(NSString *fmt, ...);
+static void kxLogOnce(NSString *fmt, ...);
 
 // ---------- 私有 IO HID 注入 ----------
 
@@ -21,21 +25,43 @@ typedef struct __IOHIDEventSystemClient *IOHIDEventSystemClientRef;
 typedef int32_t KxFixed;
 typedef struct { UInt32 hi; UInt32 lo; } KxTime;   // 与 AbsoluteTime(UnsignedWide) 同布局
 
-extern IOHIDEventSystemClientRef IOHIDEventSystemClientCreate(CFAllocatorRef);
-extern void IOHIDEventSystemClientDispatchEvent(IOHIDEventSystemClientRef client, IOHIDEventRef event);
-extern IOHIDEventRef IOHIDEventCreateDigitizerEvent(CFAllocatorRef allocator, KxTime timeStamp,
-                                                    int transducerType, uint32_t index, uint32_t identity,
-                                                    uint32_t eventMask, uint32_t buttonMask,
-                                                    KxFixed x, KxFixed y, KxFixed z,
-                                                    KxFixed tipPressure, KxFixed twist,
-                                                    Boolean range, Boolean touch, int options);
-extern IOHIDEventRef IOHIDEventCreateDigitizerFingerEventWithQuality(CFAllocatorRef allocator, KxTime timeStamp,
-                                                                     uint32_t index, uint32_t identity, uint32_t eventMask,
-                                                                     KxFixed x, KxFixed y, KxFixed z,
-                                                                     KxFixed tipPressure, KxFixed twist, KxFixed quality,
-                                                                     Boolean range, Boolean touch, int options);
-extern void IOHIDEventAppendEvent(IOHIDEventRef parent, IOHIDEventRef child, int options);
-extern void IOHIDEventSetIntegerValue(IOHIDEventRef event, uint32_t field, int value);
+// 私有符号一律运行时 dlopen 取，避免链接期找不到
+typedef IOHIDEventRef (*FnCreateFinger)(CFAllocatorRef, KxTime, uint32_t, uint32_t, uint32_t,
+                                        KxFixed, KxFixed, KxFixed, KxFixed, KxFixed, KxFixed,
+                                        Boolean, Boolean, int);
+typedef IOHIDEventRef (*FnCreateDigitizer)(CFAllocatorRef, KxTime, int, uint32_t, uint32_t, uint32_t, uint32_t,
+                                           KxFixed, KxFixed, KxFixed, KxFixed, KxFixed, Boolean, Boolean, int);
+typedef void (*FnAppend)(IOHIDEventRef, IOHIDEventRef, int);
+typedef void (*FnSetInt)(IOHIDEventRef, uint32_t, int);
+typedef IOHIDEventSystemClientRef (*FnCreateClient)(CFAllocatorRef);
+typedef void (*FnDispatch)(IOHIDEventSystemClientRef, IOHIDEventRef);
+
+static void *gIOKit = NULL;
+static FnCreateFinger pCreateFinger = NULL;
+static FnCreateDigitizer pCreateDigitizer = NULL;
+static FnAppend pAppend = NULL;
+static FnSetInt pSetInt = NULL;
+static FnCreateClient pCreateClient = NULL;
+static FnDispatch pDispatch = NULL;
+
+static BOOL kxLoadIOKit(void) {
+    if (pCreateFinger) return YES;
+    gIOKit = dlopen("/System/Library/PrivateFrameworks/IOKit.framework/IOKit", RTLD_NOW);
+    if (!gIOKit) { kxLogOnce(@"dlopen IOKit 失败: %s", dlerror()); return NO; }
+    pCreateFinger = (FnCreateFinger)dlsym(gIOKit, "IOHIDEventCreateDigitizerFingerEventWithQuality");
+    pCreateDigitizer = (FnCreateDigitizer)dlsym(gIOKit, "IOHIDEventCreateDigitizerEvent");
+    pAppend = (FnAppend)dlsym(gIOKit, "IOHIDEventAppendEvent");
+    pSetInt = (FnSetInt)dlsym(gIOKit, "IOHIDEventSetIntegerValue");
+    pCreateClient = (FnCreateClient)dlsym(gIOKit, "IOHIDEventSystemClientCreate");
+    pDispatch = (FnDispatch)dlsym(gIOKit, "IOHIDEventSystemClientDispatchEvent");
+    if (!pCreateFinger || !pCreateDigitizer || !pAppend || !pCreateClient || !pDispatch) {
+        kxLogOnce(@"dlsym 缺失 finger=%p digitizer=%p append=%p client=%p dispatch=%p",
+                  (void *)pCreateFinger, (void *)pCreateDigitizer, (void *)pAppend,
+                  (void *)pCreateClient, (void *)pDispatch);
+        return NO;
+    }
+    return YES;
+}
 
 static IOHIDEventSystemClientRef gHID = NULL;
 
@@ -61,10 +87,23 @@ static void kxLog(NSString *fmt, ...) {
     [fh closeFile];
 }
 
+static void kxLogOnce(NSString *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    NSString *s = [[NSString alloc] initWithFormat:fmt arguments:ap];
+    va_end(ap);
+    kxLog(@"%@", s);
+}
+
+static void kxLog(NSString *fmt, ...);
+
 static void kxInject(CGFloat px, CGFloat py, int phase) {
     // phase: 0=按下 1=移动 2=抬起
-    if (!gHID) gHID = IOHIDEventSystemClientCreate(kCFAllocatorDefault);
-    if (!gHID) { kxLog(@"HID client 创建失败"); return; }
+    if (!kxLoadIOKit()) return;
+    if (!gHID) {
+        gHID = pCreateClient(kCFAllocatorDefault);
+        if (!gHID) { kxLog(@"HID client 创建失败"); return; }
+    }
 
     uint32_t mask;
     Boolean range = 1, touch = 1;
@@ -79,16 +118,18 @@ static void kxInject(CGFloat px, CGFloat py, int phase) {
     KxFixed fx = (KxFixed)(px * 16.0);
     KxFixed fy = (KxFixed)(py * 16.0);
 
-    IOHIDEventRef finger = IOHIDEventCreateDigitizerFingerEventWithQuality(
-        kCFAllocatorDefault, ts, 1, 2, mask, fx, fy, 0, 0, 0, 0, range, touch, 0);
+    IOHIDEventRef finger = pCreateFinger(kCFAllocatorDefault, ts, 1, 2, mask,
+                                         fx, fy, 0, 0, 0, 0, range, touch, 0);
     if (!finger) return;
-    IOHIDEventRef hand = IOHIDEventCreateDigitizerEvent(
-        kCFAllocatorDefault, ts, 3 /* hand */, 0, 0, 0, 0, 0, 0, 0, 0, 0, range, touch, 0);
+    IOHIDEventRef hand = pCreateDigitizer(kCFAllocatorDefault, ts, 3 /* hand */, 0, 0, 0, 0,
+                                          0, 0, 0, 0, 0, range, touch, 0);
     if (!hand) { CFRelease(finger); return; }
-    IOHIDEventAppendEvent(hand, finger, 0);
-    IOHIDEventSetIntegerValue(finger, kFieldDigitizerIsDisplayIntegrated, 1);
-    IOHIDEventSetIntegerValue(hand, kFieldDigitizerIsDisplayIntegrated, 1);
-    IOHIDEventSystemClientDispatchEvent(gHID, hand);
+    pAppend(hand, finger, 0);
+    if (pSetInt) {
+        pSetInt(finger, 0x00050014, 1);
+        pSetInt(hand, 0x00050014, 1);
+    }
+    pDispatch(gHID, hand);
     CFRelease(hand);
     CFRelease(finger);
 }
