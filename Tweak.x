@@ -72,10 +72,10 @@ static void kxInject(CGFloat px, CGFloat py, int phase) {
     else if (phase == 1) mask = 0x04;          // position
     else                 mask = 0x03, range = 0, touch = 0;
 
-    AbsoluteTime raw = mach_absolute_time();
+    uint64_t raw = mach_absolute_time();
     KxTime ts;
-    ts.hi = (UInt32)(((uint64_t)raw) >> 32);
-    ts.lo = (UInt32)((uint64_t)raw);
+    ts.hi = (UInt32)(raw >> 32);
+    ts.lo = (UInt32)raw;
     KxFixed fx = (KxFixed)(px * 16.0);
     KxFixed fy = (KxFixed)(py * 16.0);
 
