@@ -17,18 +17,22 @@
 typedef struct __IOHIDEvent *IOHIDEventRef;
 typedef struct __IOHIDEventSystemClient *IOHIDEventSystemClientRef;
 
+// 自己定义，避免依赖 IOKit 私有头
+typedef int32_t KxFixed;
+typedef struct { UInt32 hi; UInt32 lo; } KxTime;   // 与 AbsoluteTime(UnsignedWide) 同布局
+
 extern IOHIDEventSystemClientRef IOHIDEventSystemClientCreate(CFAllocatorRef);
 extern void IOHIDEventSystemClientDispatchEvent(IOHIDEventSystemClientRef client, IOHIDEventRef event);
-extern IOHIDEventRef IOHIDEventCreateDigitizerEvent(CFAllocatorRef allocator, AbsoluteTime timeStamp,
+extern IOHIDEventRef IOHIDEventCreateDigitizerEvent(CFAllocatorRef allocator, KxTime timeStamp,
                                                     int transducerType, uint32_t index, uint32_t identity,
                                                     uint32_t eventMask, uint32_t buttonMask,
-                                                    IOFixed x, IOFixed y, IOFixed z,
-                                                    IOFixed tipPressure, IOFixed twist,
+                                                    KxFixed x, KxFixed y, KxFixed z,
+                                                    KxFixed tipPressure, KxFixed twist,
                                                     Boolean range, Boolean touch, int options);
-extern IOHIDEventRef IOHIDEventCreateDigitizerFingerEventWithQuality(CFAllocatorRef allocator, AbsoluteTime timeStamp,
+extern IOHIDEventRef IOHIDEventCreateDigitizerFingerEventWithQuality(CFAllocatorRef allocator, KxTime timeStamp,
                                                                      uint32_t index, uint32_t identity, uint32_t eventMask,
-                                                                     IOFixed x, IOFixed y, IOFixed z,
-                                                                     IOFixed tipPressure, IOFixed twist, IOFixed quality,
+                                                                     KxFixed x, KxFixed y, KxFixed z,
+                                                                     KxFixed tipPressure, KxFixed twist, KxFixed quality,
                                                                      Boolean range, Boolean touch, int options);
 extern void IOHIDEventAppendEvent(IOHIDEventRef parent, IOHIDEventRef child, int options);
 extern void IOHIDEventSetIntegerValue(IOHIDEventRef event, uint32_t field, int value);
@@ -68,9 +72,12 @@ static void kxInject(CGFloat px, CGFloat py, int phase) {
     else if (phase == 1) mask = 0x04;          // position
     else                 mask = 0x03, range = 0, touch = 0;
 
-    AbsoluteTime ts = mach_absolute_time();
-    IOFixed fx = (IOFixed)(px * 16.0);
-    IOFixed fy = (IOFixed)(py * 16.0);
+    AbsoluteTime raw = mach_absolute_time();
+    KxTime ts;
+    ts.hi = (UInt32)(((uint64_t)raw) >> 32);
+    ts.lo = (UInt32)((uint64_t)raw);
+    KxFixed fx = (KxFixed)(px * 16.0);
+    KxFixed fy = (KxFixed)(py * 16.0);
 
     IOHIDEventRef finger = IOHIDEventCreateDigitizerFingerEventWithQuality(
         kCFAllocatorDefault, ts, 1, 2, mask, fx, fy, 0, 0, 0, 0, range, touch, 0);
