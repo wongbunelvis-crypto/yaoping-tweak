@@ -1,0 +1,11 @@
+<array>
+	<dict>
+		<key>Filter</key>
+		<dict>
+			<key>Bundles</key>
+			<array>
+				<string>com.apple.SpringBoard</string>
+			</array>
+		</dict>
+	</dict>
+</array>
